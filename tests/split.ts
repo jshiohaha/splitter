@@ -6,9 +6,10 @@ import {
     Keypair,
     LAMPORTS_PER_SOL,
 } from "@solana/web3.js";
+import * as assert from "assert";
 
 import { Split as SplitProgram } from "../target/types/split";
-import { provideWallet, getSplitAccount, getUuid } from "./utils";
+import { expectThrowsAsync, provideWallet, getSplitAccount, getUuid } from "./utils";
 
 // Configure the client to use the local cluster.
 const provider = anchor.Provider.env();
@@ -33,14 +34,33 @@ export const printMemberInfo = (members: any[]) => {
     console.log();
 };
 
+export const getMembers = async (address: PublicKey) => {
+    const splitAccount = await program.account.split.fetch(address);
+    return splitAccount.members as any[];
+}
+
+export const getMember = (members: any[], address: PublicKey) => {
+    return members.filter(member => member.address.toString() === address.toString())[0];
+}
+
+export const isAccountDiscrepancyBelowThreshold = (
+    expected: number,
+    actual: number,
+    // diff in SOL, at $200 / SOL = $0.002
+    threshold = 0.00001
+) => {
+    const diff = (expected - actual) / LAMPORTS_PER_SOL;
+
+    return diff < threshold;
+}
+
 describe("split", async () => {
     const uuid = getUuid();
     const [splitAddress, splitBump] = await getSplitAccount(uuid);
     const randomMember = Keypair.generate();
 
-    it("Is initialized!", async () => {
-        // Add your test here.
-        const tx = await program.rpc.initialize(
+    it("Initialize split", async () => {
+        await program.rpc.initialize(
             splitBump,
             uuid,
             [
@@ -68,16 +88,35 @@ describe("split", async () => {
 
         // fetch account and assert
         const splitAccount = await program.account.split.fetch(splitAddress);
-        // console.log("splitAccount: ", splitAccount);
-
         const members = splitAccount.members as any[];
         printMemberInfo(members);
     });
 
-    // try to withdraw, expect exception.
-    // try to withdraw with non-member. expect exception.
+    it("Member attempts to withdraw their own funds when none allocated", async () => {
+        expectThrowsAsync(async () => {
+            await program.rpc.withdraw(splitBump, uuid, {
+                accounts: {
+                    payer: myWallet.publicKey,
+                    member: myWallet.publicKey,
+                    split: splitAddress,
+                    systemProgram: SystemProgram.programId,
+                },
+                signers: [myWallet],
+            });
+        });
+
+        const splitAccount = await program.account.split.fetch(splitAddress);
+        const members = splitAccount.members as any[];
+        printMemberInfo(members);
+    });
+
     it("Allocate Member Funds!", async () => {
-        // Add your test here.
+        const splitAccountBalanceBefore =
+            await program.provider.connection.getBalance(splitAddress);
+        const amountToAddToWallet = 1 * LAMPORTS_PER_SOL;
+
+        const stateOfMembersBefore = await getMembers(splitAddress);
+
         await program.rpc.allocateMemberFunds(splitBump, uuid, false, {
             accounts: {
                 payer: myWallet.publicKey,
@@ -88,56 +127,101 @@ describe("split", async () => {
                 SystemProgram.transfer({
                     fromPubkey: myWallet.publicKey,
                     toPubkey: splitAddress,
-                    lamports: 1 * LAMPORTS_PER_SOL,
+                    lamports: amountToAddToWallet,
                 }),
             ],
             signers: [myWallet],
         });
 
-        // verify treasury balance has not changed
-        const splitAccountBalance =
+        const splitAccountBalanceAfter =
             await program.provider.connection.getBalance(splitAddress);
-        console.log("splitAccountBalance: ", splitAccountBalance);
+        assert.ok(splitAccountBalanceAfter ===
+            splitAccountBalanceBefore + amountToAddToWallet);
 
-        // fetch account and assert
+        const stateOfMembersAfter = await getMembers(splitAddress);
+        printMemberInfo(stateOfMembersAfter);
+
+        for (let i = 0; i < stateOfMembersAfter.length; i++) {
+            const stateOfMemberBefore = stateOfMembersBefore[i];
+            const memberShare = amountToAddToWallet * (stateOfMemberBefore.share.toNumber() / 100);
+
+            assert.ok(stateOfMembersAfter[i].amount.toNumber() - stateOfMemberBefore.amount.toNumber()
+                    === memberShare);
+        }
+    });
+
+    it("Attempt withdraw for non-member", async () => {
+        const randomEntity = Keypair.generate();
+
+        expectThrowsAsync(async () => {
+            await program.rpc.withdraw(splitBump, uuid, {
+                accounts: {
+                    payer: randomEntity.publicKey,
+                    member: randomEntity.publicKey,
+                    split: splitAddress,
+                    systemProgram: SystemProgram.programId,
+                },
+                signers: [randomEntity],
+            });
+        });
+
         const splitAccount = await program.account.split.fetch(splitAddress);
-        // console.log("splitAccount: ", splitAccount);
-
         const members = splitAccount.members as any[];
         printMemberInfo(members);
     });
 
-    // try to withdraw, expect exception.
-    // try to withdraw with non-member. expect exception.
-    it("Withdraw my funds!", async () => {
-        // Add your test here.
+    it("Arbitrary user can initiate withdrawal for a member", async () => {
+        const randomEntity = Keypair.generate();
+
+        const splitAccountBalanceBefore =
+            await program.provider.connection.getBalance(splitAddress);
+
+        const stateOfMembersBefore = await getMembers(splitAddress);
+        const memberAddress = myWallet.publicKey;
+        const stateOfMemberBefore = getMember(stateOfMembersBefore, memberAddress);
+        const memberAmount = stateOfMemberBefore.amount.toNumber();
+
+        const memberBalanceBefore =
+            await program.provider.connection.getBalance(memberAddress);
+
         await program.rpc.withdraw(splitBump, uuid, {
             accounts: {
-                payer: myWallet.publicKey,
+                payer: randomEntity.publicKey,
+                member: myWallet.publicKey,
                 split: splitAddress,
                 systemProgram: SystemProgram.programId,
             },
-            signers: [myWallet],
+            signers: [randomEntity],
         });
 
-        // verify treasury balance has not changed
-        const splitAccountBalance =
+        const splitAccountBalanceAfter =
             await program.provider.connection.getBalance(splitAddress);
-        console.log("splitAccountBalance: ", splitAccountBalance);
+        assert.ok(splitAccountBalanceBefore > splitAccountBalanceAfter);
+        assert.ok(splitAccountBalanceBefore - splitAccountBalanceAfter === memberAmount);
 
-        // fetch account and assert
-        const splitAccount = await program.account.split.fetch(splitAddress);
-        // console.log("splitAccount: ", splitAccount);
+        const stateOfMembersAfter = await getMembers(splitAddress);
+        printMemberInfo(stateOfMembersAfter);
 
-        const members = splitAccount.members as any[];
-        printMemberInfo(members);
+        const stateOfMemberAfter = getMember(stateOfMembersAfter, memberAddress);
+        assert.ok(stateOfMemberAfter.amount.toNumber() === 0);
+
+        const memberBalanceAfter =
+            await program.provider.connection.getBalance(memberAddress);
+        const balanceDiscrepancyIsAcceptable = isAccountDiscrepancyBelowThreshold(
+            memberAmount,
+            memberBalanceAfter - memberBalanceBefore
+        );
+        assert.ok(balanceDiscrepancyIsAcceptable);
     });
 
-    // try to withdraw, expect exception.
-    // try to withdraw with non-member. expect exception.
-    it("Allocate Member Funds 2222", async () => {
-        // Add your test here.
-        await program.rpc.allocateMemberFunds(splitBump, uuid, true, {
+    it("Allocate member funds after random number of lamports added to account", async () => {
+        const splitAccountBalanceBefore =
+            await program.provider.connection.getBalance(splitAddress);
+        const amountToAddToWallet = 12345683478;
+
+        const stateOfMembersBefore = await getMembers(splitAddress);
+
+        await program.rpc.allocateMemberFunds(splitBump, uuid, false, {
             accounts: {
                 payer: myWallet.publicKey,
                 split: splitAddress,
@@ -147,48 +231,69 @@ describe("split", async () => {
                 SystemProgram.transfer({
                     fromPubkey: myWallet.publicKey,
                     toPubkey: splitAddress,
-                    lamports: 1 * LAMPORTS_PER_SOL,
+                    lamports: amountToAddToWallet,
                 }),
             ],
             signers: [myWallet],
         });
 
-        // verify treasury balance has not changed
-        const splitAccountBalance =
+        const splitAccountBalanceAfter =
             await program.provider.connection.getBalance(splitAddress);
-        console.log("splitAccountBalance: ", splitAccountBalance);
+        assert.ok(splitAccountBalanceAfter ===
+            splitAccountBalanceBefore + amountToAddToWallet);
 
-        // fetch account and assert
-        const splitAccount = await program.account.split.fetch(splitAddress);
-        // console.log("splitAccount: ", splitAccount);
+        const amountOfFundsToAllocate = amountToAddToWallet - (amountToAddToWallet % 100);
+        const stateOfMembersAfter = await getMembers(splitAddress);
+        printMemberInfo(stateOfMembersAfter);
 
-        const members = splitAccount.members as any[];
-        printMemberInfo(members);
+        for (let i = 0; i < stateOfMembersAfter.length; i++) {
+            const stateOfMemberBefore = stateOfMembersBefore[i];
+            const memberShare = amountOfFundsToAllocate * (stateOfMemberBefore.share.toNumber() / 100);
+
+            assert.ok(stateOfMembersAfter[i].amount.toNumber() - stateOfMemberBefore.amount.toNumber()
+                    === memberShare);
+        }
     });
 
-    // try to withdraw, expect exception.
-    // try to withdraw with non-member. expect exception.
-    it("Withdraw my funds, and fail!", async () => {
-        // Add your test here.
+    it("Member withdraws their own funds", async () => {
+        const splitAccountBalanceBefore =
+            await program.provider.connection.getBalance(splitAddress);
+
+        const member = myWallet;
+        const stateOfMembersBefore = await getMembers(splitAddress);
+        const stateOfMemberBefore = getMember(stateOfMembersBefore, member.publicKey);
+        const memberAmount = stateOfMemberBefore.amount.toNumber();
+
+        const memberBalanceBefore =
+            await program.provider.connection.getBalance(member.publicKey);
+
         await program.rpc.withdraw(splitBump, uuid, {
             accounts: {
-                payer: myWallet.publicKey,
+                payer: member.publicKey,
+                member: member.publicKey,
                 split: splitAddress,
                 systemProgram: SystemProgram.programId,
             },
             signers: [myWallet],
         });
 
-        // verify treasury balance has not changed
-        const splitAccountBalance =
+        const splitAccountBalanceAfter =
             await program.provider.connection.getBalance(splitAddress);
-        console.log("splitAccountBalance: ", splitAccountBalance);
+        assert.ok(splitAccountBalanceBefore > splitAccountBalanceAfter);
+        assert.ok(splitAccountBalanceBefore - splitAccountBalanceAfter === memberAmount);
 
-        // fetch account and assert
-        const splitAccount = await program.account.split.fetch(splitAddress);
-        // console.log("splitAccount: ", splitAccount);
+        const stateOfMembersAfter = await getMembers(splitAddress);
+        printMemberInfo(stateOfMembersAfter);
 
-        const members = splitAccount.members as any[];
-        printMemberInfo(members);
+        const stateOfMemberAfter = getMember(stateOfMembersAfter, member.publicKey);
+        assert.ok(stateOfMemberAfter.amount.toNumber() === 0);
+
+        const memberBalanceAfter =
+            await program.provider.connection.getBalance(member.publicKey);
+        const balanceDiscrepancyIsAcceptable = isAccountDiscrepancyBelowThreshold(
+            memberAmount,
+            memberBalanceAfter - memberBalanceBefore
+        );
+        assert.ok(balanceDiscrepancyIsAcceptable);
     });
 });

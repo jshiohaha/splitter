@@ -49,25 +49,28 @@ pub mod split {
         let withdrawable_total = compute_withdraw_amount(available_funds)?;
         msg!("amount to divide amongst members: {}", withdrawable_total);
 
-        for member in &mut ctx.accounts.split.members {
-            let member_share_percent = member.share;
+        if withdrawable_total > 0 {
+            for member in &mut ctx.accounts.split.members {
+                let member_share_percent = member.share;
 
-            let member_share_amount = withdrawable_total
-                .checked_mul(member_share_percent)
-                .unwrap()
-                .checked_div(TOTAL_SHARE_PERCENTAGE.try_into().unwrap())
-                .unwrap();
+                let member_share_amount = withdrawable_total
+                    .checked_mul(member_share_percent)
+                    .unwrap()
+                    .checked_div(TOTAL_SHARE_PERCENTAGE.try_into().unwrap())
+                    .unwrap();
 
-            member.add_funds(member_share_amount);
+                member.add_funds(member_share_amount);
 
-            msg!(
-                "member {} has share {} => {}. funds now at: {}",
-                member.address,
-                member_share_percent,
-                member_share_amount,
-                member.amount
-            );
+                msg!(
+                    "member {} has share {} => {}. funds now at: {}",
+                    member.address,
+                    member_share_percent,
+                    member_share_amount,
+                    member.amount
+                );
+            }
         }
+
 
         if fail {
             return Err(ErrorCode::NoRedeemableFunds.into());
@@ -81,10 +84,10 @@ pub mod split {
         // verify address of signer
         verify_member_exists(
             &ctx.accounts.split.members,
-            ctx.accounts.payer.key(),
+            ctx.accounts.member.key(),
         )?;
 
-        let member_idx = get_member_idx(&ctx.accounts.split.members, ctx.accounts.payer.key())?;
+        let member_idx = get_member_idx(&ctx.accounts.split.members, ctx.accounts.member.key())?;
         let member = &mut ctx.accounts.split.members[member_idx];
         let member_withdrawal_amount = member.amount;
 
@@ -107,7 +110,7 @@ pub mod split {
         **split_account.lamports.borrow_mut() = amount_after_deduction;
 
         // transfer member's share of lamports to their account
-        let member = &ctx.accounts.payer;
+        let member = &ctx.accounts.member;
         **member.lamports.borrow_mut() = member
             .lamports()
             .checked_add(member_withdrawal_amount)
@@ -208,8 +211,12 @@ pub struct AllocateFunds<'info> {
     uuid: String
 )]
 pub struct Withdraw<'info> {
-    // payer is member who wants to withdraw their share of funds
+    // payer doesn't have to be member. although, i'm not sure there's an incentive for non-members
+    // to initiate a withdraw.
     pub payer: Signer<'info>,
+    // member address to which withdrawn funds will be sent
+    #[account(mut)]
+    pub member: AccountInfo<'info>,
     #[account(mut,
         seeds = [
             SPLIT_SEED.as_bytes(),
@@ -327,7 +334,7 @@ impl Split {
 /// verify
 pub fn verify_members_share(members: &Vec<Member>) -> ProgramResult {
     let total_member_share: u64 = members.iter().map(|member| member.share).sum();
-    
+
     let valid_total_share = TOTAL_SHARE_PERCENTAGE.try_into().unwrap();
     if total_member_share != valid_total_share {
         return Err(ErrorCode::InvalidMemberShare.into());

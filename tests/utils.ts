@@ -1,7 +1,21 @@
+import { expect } from "chai";
 import { PublicKey, Keypair } from "@solana/web3.js";
 import fs from "fs";
 
 import { SPLIT_SEED, SPLIT_PROGRAM_ID, SPLIT_UUID_LEN, LOCAL_WALLET_PATH } from './constants';
+
+export const expectThrowsAsync = async (method, errorMessage = undefined) => {
+    let error = null;
+    try {
+        await method();
+    } catch (err) {
+        error = err;
+    }
+    expect(error).to.be.an("Error");
+    if (errorMessage) {
+        expect(error.message).to.equal(errorMessage);
+    }
+};
 
 export const getSplitAccount = async (uuid: string) => {
     return await PublicKey.findProgramAddress(
