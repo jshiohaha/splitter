@@ -14,12 +14,12 @@ use {
 declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 
 /// constants
-pub const TOTAL_SHARE_PERCENTAGE: usize = 100;
+pub const TOTAL_SHARE_PERCENTAGE: u8 = 100;
 pub const SPLIT_SEED: &str = "split";
 
-// - create account with static initial accounts
 // - withdraw endpoint: split account available amount among addresses
-//      - p0: SOL withdrawals, p1: SPL token withdrawals
+//      - p0: SOL withdrawals
+//      - p1: SPL token withdrawals? does this break composability?
 #[program]
 pub mod split {
     use super::*;
@@ -28,18 +28,22 @@ pub mod split {
     pub fn initialize(
         ctx: Context<Initialize>,
         bump: u8,
-        uuid: String,
+        seed: String,
         members: Vec<Member>,
     ) -> ProgramResult {
         verify_members_share(&members)?;
 
+        // quest: do we want to require initializer to be member?
+        // i don't think so because this could affect composability.
+        // need to think on this more. will revisit later.
+
         let split = &mut ctx.accounts.split;
-        split.init(bump, uuid, members)?;
+        split.init(bump, seed, ctx.accounts.payer.key(), members)?;
 
         Ok(())
     }
 
-    pub fn allocate_member_funds(ctx: Context<AllocateFunds>, _bump: u8, _uuid: String, fail: bool) -> ProgramResult {
+    pub fn allocate_member_funds(ctx: Context<AllocateFunds>, _bump: u8, _uuid: String) -> ProgramResult {
         let split_account_info = ctx.accounts.split.to_account_info();
         let available_funds = ctx.accounts.split.get_available_funds(
             split_account_info.lamports(),
@@ -47,11 +51,9 @@ pub mod split {
         )?;
 
         let withdrawable_total = compute_withdraw_amount(available_funds)?;
-        msg!("amount to divide amongst members: {}", withdrawable_total);
-
         if withdrawable_total > 0 {
             for member in &mut ctx.accounts.split.members {
-                let member_share_percent = member.share;
+                let member_share_percent = member.share.try_into().unwrap();
 
                 let member_share_amount = withdrawable_total
                     .checked_mul(member_share_percent)
@@ -62,18 +64,13 @@ pub mod split {
                 member.add_funds(member_share_amount);
 
                 msg!(
-                    "member {} has share {} => {}. funds now at: {}",
+                    "member {} // share {} // share in lamports {} // funds now at {}",
                     member.address,
                     member_share_percent,
                     member_share_amount,
                     member.amount
                 );
             }
-        }
-
-
-        if fail {
-            return Err(ErrorCode::NoRedeemableFunds.into());
         }
 
         Ok(())
@@ -101,7 +98,7 @@ pub mod split {
         // since our auction PDA has data in it, we cannot use the system program to withdraw SOL.
         // otherwise, we will get an error message that says:
         //      >> Transfer: `from` must not carry data
-        // error message source: https://github.com/solana-labs/solana/blob/master/runtime/src/system_instruction_processor.rs#L189
+        // source: https://github.com/solana-labs/solana/blob/master/runtime/src/system_instruction_processor.rs#L189
         let split_account = &ctx.accounts.split.to_account_info();
         let amount_after_deduction: u64 = split_account
             .lamports()
@@ -119,10 +116,34 @@ pub mod split {
         Ok(())
     }
 
-    // distribute remaining funds and close wallet account?
-    // pub fn close(ctx: Context<Close>) -> ProgramResult {
-    //     Ok(())
-    // }
+    // remove all lamports so that account can be garbage-collected next time rent is collected.
+    pub fn close(
+        ctx: Context<Close>,
+        _bump: u8,
+        _seed: String
+    ) -> ProgramResult {
+        // prevent account from being closed if all member funds have not been withddrawn.
+        for member in &ctx.accounts.split.members {
+            if member.amount != 0 {
+                return Err(ErrorCode::MembersFundsHaveNotBeenWithdrawn.into());
+            }
+        }
+
+        // transfer lamports from account to payer since we already verified
+        // payer = initializer via anchor macro.
+        let split_account = &ctx.accounts.split.to_account_info();
+        let split_account_balance = split_account.lamports();
+        **split_account.lamports.borrow_mut() = 0;
+
+        // transfer member's share of lamports to their account
+        let initializer = &ctx.accounts.payer;
+        **initializer.lamports.borrow_mut() = initializer
+            .lamports()
+            .checked_add(split_account_balance)
+            .ok_or(ErrorCode::NumericalOverflowError)?;
+
+        Ok(())
+    }
 }
 
 /// util functions
@@ -131,13 +152,9 @@ pub fn compute_withdraw_amount(amount: u64) -> result::Result<u64, ErrorCode> {
         .checked_rem(TOTAL_SHARE_PERCENTAGE.try_into().unwrap())
         .ok_or(ErrorCode::CheckedRemError)?;
 
-    msg!("non_withdrawable_amount: {}", non_withdrawable_amount);
-
     let withdraw_amount = amount
         .checked_sub(non_withdrawable_amount)
         .ok_or(ErrorCode::NumericalUnderflowError)?;
-
-    msg!("withdraw_amount: {}", withdraw_amount);
 
     Ok(withdraw_amount)
 }
@@ -145,8 +162,6 @@ pub fn compute_withdraw_amount(amount: u64) -> result::Result<u64, ErrorCode> {
 pub fn get_account_rent(account: AccountInfo) -> result::Result<u64, ProgramError> {
     let rent = Rent::get()?;
     let min_balance_for_rent = rent.minimum_balance(account.data_len());
-
-    msg!("min_balance_for_rent: {}", min_balance_for_rent);
 
     Ok(min_balance_for_rent)
 }
@@ -164,7 +179,8 @@ pub fn get_member_idx(members: &Vec<Member>, target: Pubkey) -> result::Result<u
 #[derive(Accounts)]
 #[instruction(
     bump: u8,
-    uuid: String,
+    seed: String,
+    members: Vec<Member>,
 )]
 pub struct Initialize<'info> {
     // payer is member who wants to withdraw their share of funds
@@ -172,22 +188,47 @@ pub struct Initialize<'info> {
     #[account(init,
         seeds = [
             SPLIT_SEED.as_bytes(),
-            uuid.as_bytes()
+            seed.as_bytes()
         ],
         bump = bump,
         payer = payer,
-        space = 1000, // todo: compute spacing
+        space = Initialize::space(seed.clone(), members.len()),
         constraint = split.to_account_info().owner == program_id,
     )]
     pub split: Account<'info, Split>,
     pub system_program: Program<'info, System>,
 }
 
+impl<'info> Initialize<'info> {
+    // assuming a seed len of 5, and max account size = 10280, max number of members would be
+    // (10280 - 73) / 41 = n = 248.9512195122.
+    fn space(seed: String, num_members: usize) -> usize {
+        return
+            // discriminator
+            8 +
+            // bump
+            1 +
+            // seed
+            4 + (8 * seed.len()) +
+            // initialized_at
+            8 +
+            // last_withdrawal
+            8 +
+            // members
+            4 + (num_members * (
+                    // address
+                    32 +
+                    // amount
+                    8 +
+                    // share
+                    1));
+    }
+}
+
 #[derive(Accounts)]
 #[instruction(
     bump: u8,
-    uuid: String,
-    fail: bool
+    seed: String,
 )]
 // anyone can call this endpoint because it doesn't actually distribute funds.
 // just allocates funds to members in the member vec.
@@ -196,7 +237,7 @@ pub struct AllocateFunds<'info> {
     #[account(mut,
         seeds = [
             SPLIT_SEED.as_bytes(),
-            uuid.as_bytes()
+            seed.as_bytes()
         ],
         bump = bump,
         constraint = split.to_account_info().owner == program_id,
@@ -208,7 +249,7 @@ pub struct AllocateFunds<'info> {
 #[derive(Accounts)]
 #[instruction(
     bump: u8,
-    uuid: String
+    seed: String
 )]
 pub struct Withdraw<'info> {
     // payer doesn't have to be member. although, i'm not sure there's an incentive for non-members
@@ -220,7 +261,7 @@ pub struct Withdraw<'info> {
     #[account(mut,
         seeds = [
             SPLIT_SEED.as_bytes(),
-            uuid.as_bytes()
+            seed.as_bytes()
         ],
         bump = bump,
         constraint = split.to_account_info().owner == program_id,
@@ -229,8 +270,29 @@ pub struct Withdraw<'info> {
     pub system_program: Program<'info, System>,
 }
 
-// #[derive(Accounts)]
-// pub struct Close<'info> {}
+#[derive(Accounts)]
+#[instruction(
+    bump: u8,
+    seed: String
+)]
+pub struct Close<'info> {
+    // payer must be initializer. random entities should not be allowed
+    // to close out the account.
+    #[account(
+        constraint = split.initializer.key() == payer.key(),
+    )]
+    pub payer: Signer<'info>,
+    #[account(mut,
+        seeds = [
+            SPLIT_SEED.as_bytes(),
+            seed.as_bytes()
+        ],
+        bump = bump,
+        constraint = split.to_account_info().owner == program_id,
+    )]
+    pub split: Account<'info, Split>,
+    pub system_program: Program<'info, System>,
+}
 
 /// structs
 #[repr(C)]
@@ -241,7 +303,7 @@ pub struct Member {
     // available amount to withdraw
     pub amount: u64,
     // percentage share of funds
-    pub share: u64,
+    pub share: u8,
 }
 
 impl Member {
@@ -263,10 +325,13 @@ impl Member {
 #[derive(Default)]
 pub struct Split {
     pub bump: u8,
-    // uuid with which Split account is initialized
-    pub uuid: String,
+    // seed with which Split account is initialized
+    pub seed: String,
     // timestamp at which wallet is initialized
     pub initialized_at: u64,
+    // entity that intialized the account. we will use this
+    // address to refund rent when closing this account.
+    pub initializer: Pubkey,
     // timestamp of last withdrawal
     pub last_withdrawal: u64,
     // entities that have claim rights to shared funds
@@ -274,13 +339,14 @@ pub struct Split {
 }
 
 impl Split {
-    pub fn init(&mut self, bump: u8, uuid: String, members: Vec<Member>) -> ProgramResult {
+    pub fn init(&mut self, bump: u8, seed: String, initializer: Pubkey, members: Vec<Member>) -> ProgramResult {
         let clock = Clock::get()?;
         let current_timestamp = u64::try_from(clock.unix_timestamp).unwrap();
 
         self.bump = bump;
-        self.uuid = uuid;
+        self.seed = seed;
         self.initialized_at = current_timestamp;
+        self.initializer = initializer;
         self.last_withdrawal = 0;
 
         self.members = Vec::new();
@@ -302,8 +368,8 @@ impl Split {
         Ok(())
     }
 
-    // ideally, i could convert &Split to AccountInfo here and then get rent & lamports.
-    // presumably, this is possible. just couldn't figure out how to do it :(
+    // ideally, we would convert &Split to AccountInfo directly and then get rent & lamports.
+    // presumably, this is possible. just couldn't figure out how to do it atm.
     pub fn get_available_funds(
         &self,
         lamports: u64,
@@ -333,10 +399,12 @@ impl Split {
 
 /// verify
 pub fn verify_members_share(members: &Vec<Member>) -> ProgramResult {
-    let total_member_share: u64 = members.iter().map(|member| member.share).sum();
+    let total_member_share: u8 = members
+        .iter()
+        .map(|member| member.share)
+        .sum();
 
-    let valid_total_share = TOTAL_SHARE_PERCENTAGE.try_into().unwrap();
-    if total_member_share != valid_total_share {
+    if total_member_share != TOTAL_SHARE_PERCENTAGE {
         return Err(ErrorCode::InvalidMemberShare.into());
     }
 
@@ -352,14 +420,14 @@ pub fn verify_member_exists(members: &Vec<Member>, target: Pubkey) -> ProgramRes
 /// errors
 #[error]
 pub enum ErrorCode {
-    #[msg("Cannot divide by zero!")]
-    DivisionByZero,
     #[msg("No redeemable funds")]
     NoRedeemableFunds,
     #[msg("Member with address does not exist")]
     MemberWithAddressDoesNotExist,
     #[msg("Insufficient account balance")]
     InsufficientAccountBalance,
+    #[msg("Please withdraw all member funds before taking this action")]
+    MembersFundsHaveNotBeenWithdrawn,
     #[msg("Total member share must be 100 percent")]
     InvalidMemberShare,
     #[msg("Checked REM error")]

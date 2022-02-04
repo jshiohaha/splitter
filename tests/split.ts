@@ -1,15 +1,25 @@
 import * as anchor from "@project-serum/anchor";
 import { Program } from "@project-serum/anchor";
 import {
-    PublicKey,
-    SystemProgram,
     Keypair,
+    SystemProgram,
     LAMPORTS_PER_SOL,
+    Transaction,
+    sendAndConfirmTransaction,
 } from "@solana/web3.js";
 import * as assert from "assert";
 
 import { Split as SplitProgram } from "../target/types/split";
-import { expectThrowsAsync, provideWallet, getSplitAccount, getUuid } from "./utils";
+import {
+    expectThrowsAsync,
+    provideWallet,
+    getSplitAccount,
+    getUuid,
+    isAccountDiscrepancyBelowThreshold,
+    getMembers,
+    getMember,
+    printMemberInfo,
+} from "./utils";
 
 // Configure the client to use the local cluster.
 const provider = anchor.Provider.env();
@@ -21,38 +31,6 @@ const program = anchor.workspace.Split as Program<SplitProgram>;
 // on osx, this is `export LOCAL_WALLET_PATH="REPLACE_WITH_PATH_TO_LOCAL_WALLET"
 // this is something like /Users/myusername/.config/solana/id.json
 const myWallet = provideWallet();
-
-export const printMemberInfo = (members: any[]) => {
-    console.log("===== MEMBER INFO =====");
-    for (let i = 0; i < members.length; i++) {
-        const member = members[i];
-        console.log('Member : ', i+1);
-        console.log('address: ', member.address.toString());
-        console.log('share: ', member.share.toNumber());
-        console.log('amount: ', member.amount.toNumber());
-    }
-    console.log();
-};
-
-export const getMembers = async (address: PublicKey) => {
-    const splitAccount = await program.account.split.fetch(address);
-    return splitAccount.members as any[];
-}
-
-export const getMember = (members: any[], address: PublicKey) => {
-    return members.filter(member => member.address.toString() === address.toString())[0];
-}
-
-export const isAccountDiscrepancyBelowThreshold = (
-    expected: number,
-    actual: number,
-    // diff in SOL, at $200 / SOL = $0.002
-    threshold = 0.00001
-) => {
-    const diff = (expected - actual) / LAMPORTS_PER_SOL;
-
-    return diff < threshold;
-}
 
 describe("split", async () => {
     const uuid = getUuid();
@@ -68,12 +46,12 @@ describe("split", async () => {
                     address: myWallet.publicKey,
                     // we will ignore amount when initializing account
                     amount: new anchor.BN(0),
-                    share: new anchor.BN(40),
+                    share: 40,
                 },
                 {
                     address: randomMember.publicKey,
                     amount: new anchor.BN(0),
-                    share: new anchor.BN(60),
+                    share: 60,
                 },
             ],
             {
@@ -86,9 +64,7 @@ describe("split", async () => {
             }
         );
 
-        // fetch account and assert
-        const splitAccount = await program.account.split.fetch(splitAddress);
-        const members = splitAccount.members as any[];
+        const members = await getMembers(program, splitAddress);
         printMemberInfo(members);
     });
 
@@ -105,8 +81,7 @@ describe("split", async () => {
             });
         });
 
-        const splitAccount = await program.account.split.fetch(splitAddress);
-        const members = splitAccount.members as any[];
+        const members = await getMembers(program, splitAddress);
         printMemberInfo(members);
     });
 
@@ -115,9 +90,9 @@ describe("split", async () => {
             await program.provider.connection.getBalance(splitAddress);
         const amountToAddToWallet = 1 * LAMPORTS_PER_SOL;
 
-        const stateOfMembersBefore = await getMembers(splitAddress);
+        const stateOfMembersBefore = await getMembers(program, splitAddress);
 
-        await program.rpc.allocateMemberFunds(splitBump, uuid, false, {
+        await program.rpc.allocateMemberFunds(splitBump, uuid, {
             accounts: {
                 payer: myWallet.publicKey,
                 split: splitAddress,
@@ -135,18 +110,24 @@ describe("split", async () => {
 
         const splitAccountBalanceAfter =
             await program.provider.connection.getBalance(splitAddress);
-        assert.ok(splitAccountBalanceAfter ===
-            splitAccountBalanceBefore + amountToAddToWallet);
+        assert.ok(
+            splitAccountBalanceAfter ===
+                splitAccountBalanceBefore + amountToAddToWallet
+        );
 
-        const stateOfMembersAfter = await getMembers(splitAddress);
+        const stateOfMembersAfter = await getMembers(program, splitAddress);
         printMemberInfo(stateOfMembersAfter);
 
         for (let i = 0; i < stateOfMembersAfter.length; i++) {
             const stateOfMemberBefore = stateOfMembersBefore[i];
-            const memberShare = amountToAddToWallet * (stateOfMemberBefore.share.toNumber() / 100);
+            const memberShare =
+                amountToAddToWallet * (stateOfMemberBefore.share / 100);
 
-            assert.ok(stateOfMembersAfter[i].amount.toNumber() - stateOfMemberBefore.amount.toNumber()
-                    === memberShare);
+            assert.ok(
+                stateOfMembersAfter[i].amount.toNumber() -
+                    stateOfMemberBefore.amount.toNumber() ===
+                    memberShare
+            );
         }
     });
 
@@ -176,9 +157,12 @@ describe("split", async () => {
         const splitAccountBalanceBefore =
             await program.provider.connection.getBalance(splitAddress);
 
-        const stateOfMembersBefore = await getMembers(splitAddress);
+        const stateOfMembersBefore = await getMembers(program, splitAddress);
         const memberAddress = myWallet.publicKey;
-        const stateOfMemberBefore = getMember(stateOfMembersBefore, memberAddress);
+        const stateOfMemberBefore = getMember(
+            stateOfMembersBefore,
+            memberAddress
+        );
         const memberAmount = stateOfMemberBefore.amount.toNumber();
 
         const memberBalanceBefore =
@@ -197,20 +181,28 @@ describe("split", async () => {
         const splitAccountBalanceAfter =
             await program.provider.connection.getBalance(splitAddress);
         assert.ok(splitAccountBalanceBefore > splitAccountBalanceAfter);
-        assert.ok(splitAccountBalanceBefore - splitAccountBalanceAfter === memberAmount);
+        assert.ok(
+            splitAccountBalanceBefore - splitAccountBalanceAfter ===
+                memberAmount
+        );
 
-        const stateOfMembersAfter = await getMembers(splitAddress);
+        const stateOfMembersAfter = await getMembers(program, splitAddress);
         printMemberInfo(stateOfMembersAfter);
 
-        const stateOfMemberAfter = getMember(stateOfMembersAfter, memberAddress);
+        const stateOfMemberAfter = getMember(
+            stateOfMembersAfter,
+            memberAddress
+        );
         assert.ok(stateOfMemberAfter.amount.toNumber() === 0);
 
-        const memberBalanceAfter =
-            await program.provider.connection.getBalance(memberAddress);
-        const balanceDiscrepancyIsAcceptable = isAccountDiscrepancyBelowThreshold(
-            memberAmount,
-            memberBalanceAfter - memberBalanceBefore
+        const memberBalanceAfter = await program.provider.connection.getBalance(
+            memberAddress
         );
+        const balanceDiscrepancyIsAcceptable =
+            isAccountDiscrepancyBelowThreshold(
+                memberAmount,
+                memberBalanceAfter - memberBalanceBefore
+            );
         assert.ok(balanceDiscrepancyIsAcceptable);
     });
 
@@ -219,9 +211,9 @@ describe("split", async () => {
             await program.provider.connection.getBalance(splitAddress);
         const amountToAddToWallet = 12345683478;
 
-        const stateOfMembersBefore = await getMembers(splitAddress);
+        const stateOfMembersBefore = await getMembers(program, splitAddress);
 
-        await program.rpc.allocateMemberFunds(splitBump, uuid, false, {
+        await program.rpc.allocateMemberFunds(splitBump, uuid, {
             accounts: {
                 payer: myWallet.publicKey,
                 split: splitAddress,
@@ -239,19 +231,26 @@ describe("split", async () => {
 
         const splitAccountBalanceAfter =
             await program.provider.connection.getBalance(splitAddress);
-        assert.ok(splitAccountBalanceAfter ===
-            splitAccountBalanceBefore + amountToAddToWallet);
+        assert.ok(
+            splitAccountBalanceAfter ===
+                splitAccountBalanceBefore + amountToAddToWallet
+        );
 
-        const amountOfFundsToAllocate = amountToAddToWallet - (amountToAddToWallet % 100);
-        const stateOfMembersAfter = await getMembers(splitAddress);
+        const amountOfFundsToAllocate =
+            amountToAddToWallet - (amountToAddToWallet % 100);
+        const stateOfMembersAfter = await getMembers(program, splitAddress);
         printMemberInfo(stateOfMembersAfter);
 
         for (let i = 0; i < stateOfMembersAfter.length; i++) {
             const stateOfMemberBefore = stateOfMembersBefore[i];
-            const memberShare = amountOfFundsToAllocate * (stateOfMemberBefore.share.toNumber() / 100);
+            const memberShare =
+                amountOfFundsToAllocate * (stateOfMemberBefore.share / 100);
 
-            assert.ok(stateOfMembersAfter[i].amount.toNumber() - stateOfMemberBefore.amount.toNumber()
-                    === memberShare);
+            assert.ok(
+                stateOfMembersAfter[i].amount.toNumber() -
+                    stateOfMemberBefore.amount.toNumber() ===
+                    memberShare
+            );
         }
     });
 
@@ -260,8 +259,11 @@ describe("split", async () => {
             await program.provider.connection.getBalance(splitAddress);
 
         const member = myWallet;
-        const stateOfMembersBefore = await getMembers(splitAddress);
-        const stateOfMemberBefore = getMember(stateOfMembersBefore, member.publicKey);
+        const stateOfMembersBefore = await getMembers(program, splitAddress);
+        const stateOfMemberBefore = getMember(
+            stateOfMembersBefore,
+            member.publicKey
+        );
         const memberAmount = stateOfMemberBefore.amount.toNumber();
 
         const memberBalanceBefore =
@@ -280,20 +282,168 @@ describe("split", async () => {
         const splitAccountBalanceAfter =
             await program.provider.connection.getBalance(splitAddress);
         assert.ok(splitAccountBalanceBefore > splitAccountBalanceAfter);
-        assert.ok(splitAccountBalanceBefore - splitAccountBalanceAfter === memberAmount);
+        assert.ok(
+            splitAccountBalanceBefore - splitAccountBalanceAfter ===
+                memberAmount
+        );
 
-        const stateOfMembersAfter = await getMembers(splitAddress);
+        const stateOfMembersAfter = await getMembers(program, splitAddress);
         printMemberInfo(stateOfMembersAfter);
 
-        const stateOfMemberAfter = getMember(stateOfMembersAfter, member.publicKey);
+        const stateOfMemberAfter = getMember(
+            stateOfMembersAfter,
+            member.publicKey
+        );
         assert.ok(stateOfMemberAfter.amount.toNumber() === 0);
 
-        const memberBalanceAfter =
-            await program.provider.connection.getBalance(member.publicKey);
-        const balanceDiscrepancyIsAcceptable = isAccountDiscrepancyBelowThreshold(
-            memberAmount,
-            memberBalanceAfter - memberBalanceBefore
+        const memberBalanceAfter = await program.provider.connection.getBalance(
+            member.publicKey
         );
+        const balanceDiscrepancyIsAcceptable =
+            isAccountDiscrepancyBelowThreshold(
+                memberAmount,
+                memberBalanceAfter - memberBalanceBefore
+            );
         assert.ok(balanceDiscrepancyIsAcceptable);
+    });
+
+    it("Attempt to close account before all members have withdrawn their funds", async () => {
+        expectThrowsAsync(async () => {
+            await program.rpc.close(splitBump, uuid, {
+                accounts: {
+                    payer: myWallet.publicKey,
+                    split: splitAddress,
+                    systemProgram: SystemProgram.programId,
+                },
+                signers: [myWallet],
+            });
+        });
+    });
+
+    it("Distribute all funds, initiated by random entity", async () => {
+        const randomEntity = Keypair.generate();
+
+        const splitAccountBalanceBefore =
+            await program.provider.connection.getBalance(splitAddress);
+
+        const stateOfMembersBefore = await getMembers(program, splitAddress);
+
+        // airdrop some SOL to liquidator
+        const airdropSignature =
+            await program.provider.connection.requestAirdrop(
+                randomEntity.publicKey,
+                0.1 * LAMPORTS_PER_SOL
+            );
+        await program.provider.connection.confirmTransaction(airdropSignature);
+
+        let memberAccountBalances = new Map();
+        let totalAmountToWithdraw = 0;
+        // compose tx with distribute ix for all members
+        // https://solanacookbook.com/references/basic-transactions.html
+        const txToExecute = new Transaction();
+        for (let i = 0; i < stateOfMembersBefore.length; i++) {
+            const member = stateOfMembersBefore[i];
+
+            // make sure non-local wallets have some SOL
+            if (member.address.toString() !== myWallet.publicKey.toString()) {
+                const airdropSignature =
+                    await program.provider.connection.requestAirdrop(
+                        member.address,
+                        0.1 * LAMPORTS_PER_SOL
+                    );
+
+                await program.provider.connection.confirmTransaction(
+                    airdropSignature
+                );
+            }
+
+            // collect account balances of all members before tx
+            const memberBalance = await program.provider.connection.getBalance(
+                member.address
+            );
+            memberAccountBalances.set(member.address.toString(), memberBalance);
+
+            // ignore members that do not have any funds to withdraw
+            if (member.amount.toNumber() > 0) {
+                totalAmountToWithdraw += member.amount.toNumber();
+                txToExecute.add(
+                    await program.instruction.withdraw(splitBump, uuid, {
+                        accounts: {
+                            payer: randomEntity.publicKey,
+                            member: member.address,
+                            split: splitAddress,
+                            systemProgram: SystemProgram.programId,
+                        },
+                        signers: [randomEntity],
+                    })
+                );
+            }
+        }
+
+        // // optionally uncomment to fail tx for unknown member
+        // txToExecute.add(
+        //     await program.instruction.withdraw(splitBump, uuid, {
+        //         accounts: {
+        //             payer: randomEntity.publicKey,
+        //             member: Keypair.generate().publicKey,
+        //             split: splitAddress,
+        //             systemProgram: SystemProgram.programId,
+        //         },
+        //         signers: [randomEntity],
+        //     })
+        // );
+
+        await sendAndConfirmTransaction(
+            program.provider.connection,
+            txToExecute,
+            [randomEntity]
+        );
+
+        const splitAccountBalanceAfter =
+            await program.provider.connection.getBalance(splitAddress);
+
+        const balanceDiscrepancyIsAcceptable =
+            isAccountDiscrepancyBelowThreshold(
+                splitAccountBalanceAfter,
+                splitAccountBalanceBefore - totalAmountToWithdraw
+            );
+        assert.ok(balanceDiscrepancyIsAcceptable);
+
+        const stateOfMembersAfter = await getMembers(program, splitAddress);
+        printMemberInfo(stateOfMembersAfter);
+
+        for (let i = 0; i < stateOfMembersAfter.length; i++) {
+            const member = stateOfMembersAfter[i];
+            // verify member accounts all increased by expected amount
+            const memberAccountBalanceBeforeTx = memberAccountBalances.get(
+                member.address.toString()
+            );
+            const memberAccountBalanceAfterTx =
+                await program.provider.connection.getBalance(member.address);
+
+            const balanceDiscrepancyIsAcceptable =
+                isAccountDiscrepancyBelowThreshold(
+                    memberAccountBalanceAfterTx,
+                    memberAccountBalanceBeforeTx +
+                        stateOfMembersBefore[i].amount.toNumber()
+                );
+            assert.ok(balanceDiscrepancyIsAcceptable);
+            assert.ok(stateOfMembersAfter[i].amount.toNumber() === 0);
+        }
+    });
+
+    it("Close split account after all members have withdrawn their funds", async () => {
+        await program.rpc.close(splitBump, uuid, {
+            accounts: {
+                payer: myWallet.publicKey,
+                split: splitAddress,
+                systemProgram: SystemProgram.programId,
+            },
+            signers: [myWallet],
+        });
+
+        const splitAccountBalanceAfter =
+            await program.provider.connection.getBalance(splitAddress);
+        assert.ok(splitAccountBalanceAfter === 0);
     });
 });
