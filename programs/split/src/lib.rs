@@ -29,6 +29,7 @@ pub mod split {
         ctx: Context<Initialize>,
         bump: u8,
         seed: String,
+        is_secure_withdrawal: bool,
         members: Vec<Member>,
     ) -> ProgramResult {
         verify_members_share(&members)?;
@@ -36,14 +37,12 @@ pub mod split {
         // quest: do we want to require initializer to be member?
         // i don't think so because this could affect composability.
         // need to think on this more. will revisit later.
-
-        let split = &mut ctx.accounts.split;
-        split.init(bump, seed, ctx.accounts.payer.key(), members)?;
+        ctx.accounts.split.init(bump, seed, is_secure_withdrawal, ctx.accounts.payer.key(), members)?;
 
         Ok(())
     }
 
-    pub fn allocate_member_funds(ctx: Context<AllocateFunds>, _bump: u8, _uuid: String) -> ProgramResult {
+    pub fn allocate_member_funds(ctx: Context<AllocateFunds>, _bump: u8, _seed: String) -> ProgramResult {
         let split_account_info = ctx.accounts.split.to_account_info();
         let available_funds = ctx.accounts.split.get_available_funds(
             split_account_info.lamports(),
@@ -61,7 +60,7 @@ pub mod split {
                     .checked_div(TOTAL_SHARE_PERCENTAGE.try_into().unwrap())
                     .unwrap();
 
-                member.add_funds(member_share_amount);
+                member.add_funds(member_share_amount)?;
 
                 msg!(
                     "member {} // share {} // share in lamports {} // funds now at {}",
@@ -77,8 +76,13 @@ pub mod split {
     }
 
     // simplify by splitting withdraw into withdraw and allocate_shares
-    pub fn withdraw(ctx: Context<Withdraw>, _bump: u8, _uuid: String) -> ProgramResult {
-        // verify address of signer
+    pub fn withdraw(ctx: Context<Withdraw>, _bump: u8, _seed: String) -> ProgramResult {
+
+        if ctx.accounts.split.is_secure_withdrawal
+            && ctx.accounts.member.key() != ctx.accounts.payer.key() {
+                return Err(ErrorCode::NotAuthorizedToWithdrawFunds.into());
+        }
+
         verify_member_exists(
             &ctx.accounts.split.members,
             ctx.accounts.member.key(),
@@ -92,8 +96,8 @@ pub mod split {
             return Err(ErrorCode::NoRedeemableFunds.into());
         }
 
-        member.reset_funds();
-        &ctx.accounts.split.update_last_withdrawal()?;
+        member.reset_funds()?;
+        ctx.accounts.split.update_last_withdrawal()?;
 
         // since our auction PDA has data in it, we cannot use the system program to withdraw SOL.
         // otherwise, we will get an error message that says:
@@ -129,8 +133,7 @@ pub mod split {
             }
         }
 
-        // transfer lamports from account to payer since we already verified
-        // payer = initializer via anchor macro.
+        // transfer lamports from account to payer since we already verified payer = initializer via anchor macro.
         let split_account = &ctx.accounts.split.to_account_info();
         let split_account_balance = split_account.lamports();
         **split_account.lamports.borrow_mut() = 0;
@@ -180,6 +183,7 @@ pub fn get_member_idx(members: &Vec<Member>, target: Pubkey) -> result::Result<u
 #[instruction(
     bump: u8,
     seed: String,
+    is_secure_withdrawal: bool,
     members: Vec<Member>,
 )]
 pub struct Initialize<'info> {
@@ -327,6 +331,10 @@ pub struct Split {
     pub bump: u8,
     // seed with which Split account is initialized
     pub seed: String,
+    // is withdrawal restricted to member; can be used in the case where users want to restrict
+    // how often withdraws into their account are initiated. in the case of layered splits, we
+    // probably only want to set this for the final layer.
+    pub is_secure_withdrawal: bool,
     // timestamp at which wallet is initialized
     pub initialized_at: u64,
     // entity that intialized the account. we will use this
@@ -339,12 +347,13 @@ pub struct Split {
 }
 
 impl Split {
-    pub fn init(&mut self, bump: u8, seed: String, initializer: Pubkey, members: Vec<Member>) -> ProgramResult {
+    pub fn init(&mut self, bump: u8, seed: String, is_secure_withdrawal: bool, initializer: Pubkey, members: Vec<Member>) -> ProgramResult {
         let clock = Clock::get()?;
         let current_timestamp = u64::try_from(clock.unix_timestamp).unwrap();
 
         self.bump = bump;
         self.seed = seed;
+        self.is_secure_withdrawal = is_secure_withdrawal;
         self.initialized_at = current_timestamp;
         self.initializer = initializer;
         self.last_withdrawal = 0;
@@ -430,6 +439,8 @@ pub enum ErrorCode {
     MembersFundsHaveNotBeenWithdrawn,
     #[msg("Total member share must be 100 percent")]
     InvalidMemberShare,
+    #[msg("Member must withdraw their own funds")]
+    NotAuthorizedToWithdrawFunds,
     #[msg("Checked REM error")]
     CheckedRemError,
     #[msg("Numerical overflow error")]

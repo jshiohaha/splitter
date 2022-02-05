@@ -5,6 +5,6 @@ export const SPLIT_PROGRAM_ID = new PublicKey(
 );
 
 export const SPLIT_SEED = "split";
-export const SPLIT_UUID_LEN = 5;
+export const SPLIT_INIT_SEED_LEN = 5;
 
 export const LOCAL_WALLET_PATH = process.env.LOCAL_WALLET_PATH;

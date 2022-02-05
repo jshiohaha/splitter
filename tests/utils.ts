@@ -7,7 +7,7 @@ import {
 import fs from "fs";
 
 import { Program } from "@project-serum/anchor";
-import { SPLIT_SEED, SPLIT_PROGRAM_ID, SPLIT_UUID_LEN, LOCAL_WALLET_PATH } from './constants';
+import { SPLIT_SEED, SPLIT_PROGRAM_ID, SPLIT_INIT_SEED_LEN, LOCAL_WALLET_PATH } from './constants';
 import { Split as SplitProgram } from "../target/types/split";
 
 export const expectThrowsAsync = async (method, errorMessage = undefined) => {
@@ -23,9 +23,9 @@ export const expectThrowsAsync = async (method, errorMessage = undefined) => {
     }
 };
 
-export const getSplitAccount = async (uuid: string) => {
+export const getSplitAccount = async (seed: string) => {
     return await PublicKey.findProgramAddress(
-        [Buffer.from(SPLIT_SEED), Buffer.from(uuid)],
+        [Buffer.from(SPLIT_SEED), Buffer.from(seed)],
         SPLIT_PROGRAM_ID
     );
 };
@@ -40,9 +40,9 @@ export const provideWallet = () => {
     );
 }
 
-export function getUuid() {
+export function getSeed() {
     return Keypair.generate().publicKey
-            .toBase58().slice(0, SPLIT_UUID_LEN);
+            .toBase58().slice(0, SPLIT_INIT_SEED_LEN);
 }
 
 

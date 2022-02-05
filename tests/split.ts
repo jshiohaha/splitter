@@ -14,7 +14,7 @@ import {
     expectThrowsAsync,
     provideWallet,
     getSplitAccount,
-    getUuid,
+    getSeed,
     isAccountDiscrepancyBelowThreshold,
     getMembers,
     getMember,
@@ -32,15 +32,16 @@ const program = anchor.workspace.Split as Program<SplitProgram>;
 // this is something like /Users/myusername/.config/solana/id.json
 const myWallet = provideWallet();
 
-describe("split", async () => {
-    const uuid = getUuid();
-    const [splitAddress, splitBump] = await getSplitAccount(uuid);
+describe("default split lifetime", async () => {
+    const seed = getSeed();
+    const [splitAddress, splitBump] = await getSplitAccount(seed);
     const randomMember = Keypair.generate();
 
     it("Initialize split", async () => {
         await program.rpc.initialize(
             splitBump,
-            uuid,
+            seed,
+            false,
             [
                 {
                     address: myWallet.publicKey,
@@ -70,7 +71,7 @@ describe("split", async () => {
 
     it("Member attempts to withdraw their own funds when none allocated", async () => {
         expectThrowsAsync(async () => {
-            await program.rpc.withdraw(splitBump, uuid, {
+            await program.rpc.withdraw(splitBump, seed, {
                 accounts: {
                     payer: myWallet.publicKey,
                     member: myWallet.publicKey,
@@ -92,7 +93,7 @@ describe("split", async () => {
 
         const stateOfMembersBefore = await getMembers(program, splitAddress);
 
-        await program.rpc.allocateMemberFunds(splitBump, uuid, {
+        await program.rpc.allocateMemberFunds(splitBump, seed, {
             accounts: {
                 payer: myWallet.publicKey,
                 split: splitAddress,
@@ -135,7 +136,7 @@ describe("split", async () => {
         const randomEntity = Keypair.generate();
 
         expectThrowsAsync(async () => {
-            await program.rpc.withdraw(splitBump, uuid, {
+            await program.rpc.withdraw(splitBump, seed, {
                 accounts: {
                     payer: randomEntity.publicKey,
                     member: randomEntity.publicKey,
@@ -168,7 +169,7 @@ describe("split", async () => {
         const memberBalanceBefore =
             await program.provider.connection.getBalance(memberAddress);
 
-        await program.rpc.withdraw(splitBump, uuid, {
+        await program.rpc.withdraw(splitBump, seed, {
             accounts: {
                 payer: randomEntity.publicKey,
                 member: myWallet.publicKey,
@@ -213,7 +214,7 @@ describe("split", async () => {
 
         const stateOfMembersBefore = await getMembers(program, splitAddress);
 
-        await program.rpc.allocateMemberFunds(splitBump, uuid, {
+        await program.rpc.allocateMemberFunds(splitBump, seed, {
             accounts: {
                 payer: myWallet.publicKey,
                 split: splitAddress,
@@ -269,7 +270,7 @@ describe("split", async () => {
         const memberBalanceBefore =
             await program.provider.connection.getBalance(member.publicKey);
 
-        await program.rpc.withdraw(splitBump, uuid, {
+        await program.rpc.withdraw(splitBump, seed, {
             accounts: {
                 payer: member.publicKey,
                 member: member.publicKey,
@@ -309,7 +310,7 @@ describe("split", async () => {
 
     it("Attempt to close account before all members have withdrawn their funds", async () => {
         expectThrowsAsync(async () => {
-            await program.rpc.close(splitBump, uuid, {
+            await program.rpc.close(splitBump, seed, {
                 accounts: {
                     payer: myWallet.publicKey,
                     split: splitAddress,
@@ -367,7 +368,7 @@ describe("split", async () => {
             if (member.amount.toNumber() > 0) {
                 totalAmountToWithdraw += member.amount.toNumber();
                 txToExecute.add(
-                    await program.instruction.withdraw(splitBump, uuid, {
+                    await program.instruction.withdraw(splitBump, seed, {
                         accounts: {
                             payer: randomEntity.publicKey,
                             member: member.address,
@@ -382,7 +383,7 @@ describe("split", async () => {
 
         // // optionally uncomment to fail tx for unknown member
         // txToExecute.add(
-        //     await program.instruction.withdraw(splitBump, uuid, {
+        //     await program.instruction.withdraw(splitBump, seed, {
         //         accounts: {
         //             payer: randomEntity.publicKey,
         //             member: Keypair.generate().publicKey,
@@ -433,7 +434,7 @@ describe("split", async () => {
     });
 
     it("Close split account after all members have withdrawn their funds", async () => {
-        await program.rpc.close(splitBump, uuid, {
+        await program.rpc.close(splitBump, seed, {
             accounts: {
                 payer: myWallet.publicKey,
                 split: splitAddress,
@@ -446,4 +447,59 @@ describe("split", async () => {
             await program.provider.connection.getBalance(splitAddress);
         assert.ok(splitAccountBalanceAfter === 0);
     });
+});
+
+describe("secure split lifetime", async () => {
+    const seed = getSeed();
+    const [splitAddress, splitBump] = await getSplitAccount(seed);
+    const randomMember = Keypair.generate();
+
+    it("Initialize split", async () => {
+        await program.rpc.initialize(
+            splitBump,
+            seed,
+            true, // secure withdrawals
+            [
+                {
+                    address: myWallet.publicKey,
+                    // we will ignore amount when initializing account
+                    amount: new anchor.BN(0),
+                    share: 30,
+                },
+                {
+                    address: randomMember.publicKey,
+                    amount: new anchor.BN(0),
+                    share: 70,
+                },
+            ],
+            {
+                accounts: {
+                    payer: myWallet.publicKey,
+                    split: splitAddress,
+                    systemProgram: SystemProgram.programId,
+                },
+                signers: [myWallet],
+            }
+        );
+
+        const members = await getMembers(program, splitAddress);
+        printMemberInfo(members);
+    });
+
+    it("Arbitrary user is blocked from initiating withdrawal for a member", async () => {
+        const randomEntity = Keypair.generate();
+
+        expectThrowsAsync(async () => {
+            await program.rpc.withdraw(splitBump, seed, {
+                accounts: {
+                    payer: randomEntity.publicKey,
+                    member: myWallet.publicKey,
+                    split: splitAddress,
+                    systemProgram: SystemProgram.programId,
+                },
+                signers: [randomEntity],
+            });
+        }, "Member must withdraw their own funds");
+    });
+
 });
