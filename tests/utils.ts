@@ -1,3 +1,4 @@
+import * as anchor from "@project-serum/anchor";
 import { expect } from "chai";
 import {
     PublicKey,
@@ -5,6 +6,7 @@ import {
     LAMPORTS_PER_SOL,
   } from "@solana/web3.js";
 import fs from "fs";
+import * as assert from "assert";
 
 import { Program } from "@project-serum/anchor";
 import { SPLIT_SEED, SPLIT_PROGRAM_ID, SPLIT_INIT_SEED_LEN, LOCAL_WALLET_PATH } from './constants';
@@ -40,7 +42,7 @@ export const provideWallet = () => {
     );
 }
 
-export function getSeed() {
+export const getSeed = () => {
     return Keypair.generate().publicKey
             .toBase58().slice(0, SPLIT_INIT_SEED_LEN);
 }
@@ -59,7 +61,7 @@ export const getMember = (members: any[], address: PublicKey) => {
 }
 
 // prefer this instead of directly comparing account balances because tx fees can invalidate
-// direct account balance checks. 
+// direct account balance checks.
 export const isAccountDiscrepancyBelowThreshold = (
     expected: number,
     actual: number,
@@ -81,3 +83,33 @@ export const printMemberInfo = (members: any[]) => {
     }
     console.log();
 };
+
+export const getMembersList = (members: any) => {
+    const commonShare = Math.round(100 / members.length);
+    const leftOverShare = 100 - (commonShare * members.length);
+    assert.ok(commonShare * members.length + leftOverShare === 100);
+
+    return members.map((member, idx) => {
+        return {
+            'address': member.publicKey,
+            'amount': new anchor.BN(0),
+            'share': idx === members.length-1
+                ? commonShare+leftOverShare
+                : commonShare,
+        }
+    });
+}
+
+export const getMemberBalances = async (
+    program: Program<SplitProgram>,
+    members: any
+) => {
+    const memberBalances = new Map();
+    for (let i = 0; i < members.length; i++) {
+        const member = members[i];
+        const memberBalance = await program.provider.connection.getBalance(member.address);
+        memberBalances.set(member.address.toString(), memberBalance);
+    }
+
+    return memberBalances;
+}
