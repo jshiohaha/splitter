@@ -77,24 +77,6 @@ export class SplitClient extends AccountUtils {
         ]);
     }
 
-    //  // --------------------------------------- get all PDAs by type
-    //  //https://project-serum.github.io/anchor/ts/classes/accountclient.html#all
-    //   async fetchAllSplitPdas(uuid?: string) {
-    //     const filter = uuid
-    //       ? [
-    //           {
-    //             memcmp: {
-    //               offset: 10, //need to prepend 8 bytes for anchor's disc
-    //               bytes: Buffer.from(uuid)
-    //             },
-    //           },
-    //         ]
-    //       : [];
-    //     const pdas = await this.splitProgram.account.split.all(filter);
-    //     console.log(`found a total of ${pdas.length} split PDAs`);
-    //     return pdas;
-    //   }
-
     // ============================================================================
     // execute program txs
     // ============================================================================
@@ -114,13 +96,13 @@ export class SplitClient extends AccountUtils {
         const signers = [];
         if (payerIsKeypair) signers.push(<Keypair>payer);
 
-        // if (this.isVerbose) {
-        //     console.log(
-        //         `calling initialize split with address ${split.toString()}. payer: ${_payer.toString()} and ${
-        //             signers.length
-        //         } signers`
-        //     );
-        // }
+        if (this.isVerbose) {
+            console.log(
+                `calling initialize split with address ${split.toString()}. payer: ${_payer.toString()} and ${
+                    signers.length
+                } signers`
+            );
+        }
 
         await this.splitProgram.rpc.initialize(
             bump,
