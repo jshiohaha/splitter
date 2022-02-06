@@ -1,5 +1,5 @@
 [programs.localnet]
-split = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+split = "3oh37U1TkdaiigSrfSq5ojmPiHAs82mYF4PRcYLRUxAh"
 
 [registry]
 url = "https://anchor.projectserum.com"
@@ -9,4 +9,4 @@ cluster = "localnet"
 wallet = "/Users/jacobshiohira/.config/solana/id.json"
 
 [scripts]
-test = "ts-mocha -p ./tsconfig.json -t 1000000 tests/*.ts"
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"

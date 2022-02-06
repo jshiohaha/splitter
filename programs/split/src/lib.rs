@@ -11,7 +11,7 @@ use {
     },
 };
 
-declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+declare_id!("3oh37U1TkdaiigSrfSq5ojmPiHAs82mYF4PRcYLRUxAh");
 
 /// constants
 pub const TOTAL_SHARE_PERCENTAGE: u8 = 100;
@@ -32,6 +32,10 @@ pub mod split {
         is_secure_withdrawal: bool,
         members: Vec<Member>,
     ) -> ProgramResult {
+        if members.len() == 0 {
+            return Err(ErrorCode::AtLeastOneMemberRequired.into());
+        }
+
         verify_members_share(&members)?;
 
         // quest: do we want to require initializer to be member?
@@ -188,6 +192,7 @@ pub fn get_member_idx(members: &Vec<Member>, target: Pubkey) -> result::Result<u
 )]
 pub struct Initialize<'info> {
     // payer is member who wants to withdraw their share of funds
+    #[account(mut)]
     pub payer: Signer<'info>,
     #[account(init,
         seeds = [
@@ -283,6 +288,7 @@ pub struct Close<'info> {
     // payer must be initializer. random entities should not be allowed
     // to close out the account.
     #[account(
+        mut,
         constraint = split.initializer.key() == payer.key(),
     )]
     pub payer: Signer<'info>,
@@ -429,6 +435,8 @@ pub fn verify_member_exists(members: &Vec<Member>, target: Pubkey) -> ProgramRes
 /// errors
 #[error]
 pub enum ErrorCode {
+    #[msg("Must be initialized with at least 1 member")]
+    AtLeastOneMemberRequired,
     #[msg("No redeemable funds")]
     NoRedeemableFunds,
     #[msg("Member with address does not exist")]
